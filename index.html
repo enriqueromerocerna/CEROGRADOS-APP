@@ -140,27 +140,52 @@ tr:last-child td{border-bottom:none;}
 <body>
 <div class="wrap" id="app">Cargando…</div>
 
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <script>
-const STORAGE_KEYS = { finanzas:'finanzas:entries', inventario:'inventario:items', inversion:'inversion:items', config:'config:app' };
+// ⚠️ PASO 1: reemplaza estos valores con los de TU proyecto de Firebase
+// (Firebase Console → ⚙️ Configuración del proyecto → tus apps → SDK setup and configuration)
+const firebaseConfig = {
+  apiKey: "TU_API_KEY",
+  authDomain: "TU_PROYECTO.firebaseapp.com",
+  projectId: "TU_PROYECTO",
+  storageBucket: "TU_PROYECTO.appspot.com",
+  messagingSenderId: "TU_SENDER_ID",
+  appId: "TU_APP_ID"
+};
+
+const STORAGE_KEYS = { finanzas:'finanzas', inventario:'inventario', inversion:'inversion', config:'config' };
 let state = { finanzas:[], inventario:[], inversion:[], config:{pin:'2027'} };
 let mode = 'admin'; // 'admin' | 'investor'
 let unlocked = false;
 let tab = 'resumen';
+let db = null;
 
-async function loadAll(){
-  for(const [key, storageKey] of Object.entries(STORAGE_KEYS)){
-    try{
-      const raw = localStorage.getItem(storageKey);
-      if(raw) state[key] = JSON.parse(raw);
-    }catch(e){ /* no existe aún */ }
-  }
+function iniciarSincronizacion(){
+  Object.entries(STORAGE_KEYS).forEach(([key, docId])=>{
+    db.collection('cerogrados').doc(docId).onSnapshot(snap=>{
+      if(snap.exists){
+        const data = snap.data();
+        if(data && typeof data.value === 'string'){
+          try{ state[key] = JSON.parse(data.value); }catch(e){ /* dato corrupto, se ignora */ }
+        }
+      }
+      render();
+    }, err=>{
+      console.error('Error de sincronización con Firebase', docId, err);
+    });
+  });
 }
+
 async function save(key){
   try{
-    localStorage.setItem(STORAGE_KEYS[key], JSON.stringify(state[key]));
+    await db.collection('cerogrados').doc(STORAGE_KEYS[key]).set({
+      value: JSON.stringify(state[key]),
+      actualizado: new Date().toISOString()
+    });
   }catch(e){
     console.error('No se pudo guardar', key, e);
-    alert('No se pudo guardar el movimiento. Revisa la consola.');
+    alert('No se pudo guardar. Revisa tu conexión a internet.');
   }
 }
 
@@ -300,7 +325,14 @@ function panelFinanzas(){
       <div><label>Tipo</label><select id="fTipo"><option value="ingreso">Ingreso</option><option value="gasto">Gasto</option></select></div>
       <div id="fMetodoWrap"><label>Método (si es ingreso)</label><select id="fMetodo"><option>YAPE</option><option>Efectivo</option></select></div>
       <div id="fProductoWrap"><label>Producto</label><select id="fProducto"></select></div>
+      <div id="fCantidadWrap" style="display:none;"><label id="fCantidadLabel">Cantidad</label><input type="number" min="0" step="1" id="fCantidad" placeholder="0"></div>
       <div><label>Fecha</label><input type="date" id="fFecha" value="${todayStr()}"></div>
+    </div>
+    <div class="form-row" id="fAmbosWrap" style="display:none;">
+      <div><label>Cantidad Raspadilla (S/ ${PRECIOS.Raspadilla} c/u)</label><input type="number" min="0" step="1" id="fCantRaspadilla" placeholder="0"></div>
+      <div><label>Cantidad Marciano (S/ ${PRECIOS.Marciano} c/u)</label><input type="number" min="0" step="1" id="fCantMarciano" placeholder="0"></div>
+    </div>
+    <div class="form-row">
       <div><label>Monto (S/)</label><input type="number" step="0.10" id="fMonto" placeholder="0.00"></div>
     </div>
     <div class="form-row">
@@ -401,8 +433,9 @@ function panelInversion(isInvestor){
   `;
 }
 
+const PRECIOS = { Raspadilla: 5, Marciano: 2 };
 const PRODUCTOS_POR_TIPO = {
-  ingreso: ['Raspadilla','Marciano','Otro'],
+  ingreso: ['Raspadilla','Marciano','Ambos','Otro'],
   gasto: ['Almuerzo','Otro']
 };
 
@@ -420,19 +453,57 @@ function actualizarFormularioFinanza(){
   productoSel.innerHTML = opciones.map(o=>`<option value="${o}">${o}</option>`).join('');
   productoWrap.style.display = opciones.length ? '' : 'none';
 
-  aplicarProductoADetalle();
+  actualizarCamposProducto();
 }
 
-function aplicarProductoADetalle(){
-  const productoSel = document.getElementById('fProducto');
+function actualizarCamposProducto(){
+  const tipo = document.getElementById('fTipo').value;
+  const producto = document.getElementById('fProducto').value;
+  const cantidadWrap = document.getElementById('fCantidadWrap');
+  const cantidadLabel = document.getElementById('fCantidadLabel');
+  const ambosWrap = document.getElementById('fAmbosWrap');
+  const montoInput = document.getElementById('fMonto');
   const detalle = document.getElementById('fDetalle');
-  if(!productoSel || !detalle) return;
-  if(productoSel.value === 'Otro'){
+
+  cantidadWrap.style.display = 'none';
+  ambosWrap.style.display = 'none';
+  montoInput.readOnly = false;
+
+  if(tipo==='ingreso' && (producto==='Raspadilla' || producto==='Marciano')){
+    cantidadWrap.style.display = '';
+    cantidadLabel.textContent = `Cantidad (${producto}, S/ ${PRECIOS[producto]} c/u)`;
+    montoInput.readOnly = true;
+    calcularMontoSimple();
+  } else if(tipo==='ingreso' && producto==='Ambos'){
+    ambosWrap.style.display = '';
+    montoInput.readOnly = true;
+    calcularMontoAmbos();
+  } else if(producto==='Otro'){
+    montoInput.value = '';
     detalle.value = '';
     detalle.focus();
-  } else {
-    detalle.value = productoSel.value;
+  } else if(producto==='Almuerzo'){
+    detalle.value = 'Almuerzo';
   }
+}
+
+function calcularMontoSimple(){
+  const producto = document.getElementById('fProducto').value;
+  const cant = parseFloat(document.getElementById('fCantidad').value) || 0;
+  const precio = PRECIOS[producto] || 0;
+  document.getElementById('fMonto').value = (cant*precio).toFixed(2);
+  document.getElementById('fDetalle').value = cant>0 ? `${cant} ${producto}` : producto;
+}
+
+function calcularMontoAmbos(){
+  const cR = parseFloat(document.getElementById('fCantRaspadilla').value) || 0;
+  const cM = parseFloat(document.getElementById('fCantMarciano').value) || 0;
+  const total = cR*PRECIOS.Raspadilla + cM*PRECIOS.Marciano;
+  document.getElementById('fMonto').value = total.toFixed(2);
+  const partes = [];
+  if(cR>0) partes.push(`${cR} Raspadilla`);
+  if(cM>0) partes.push(`${cM} Marciano`);
+  document.getElementById('fDetalle').value = partes.join(' + ') || 'Raspadilla + Marciano';
 }
 
 function attachPanelHandlers(){
@@ -440,8 +511,14 @@ function attachPanelHandlers(){
 
   const tipoSel = document.getElementById('fTipo');
   const productoSel = document.getElementById('fProducto');
+  const cantidadInput = document.getElementById('fCantidad');
+  const cantRaspadilla = document.getElementById('fCantRaspadilla');
+  const cantMarciano = document.getElementById('fCantMarciano');
   if(tipoSel) tipoSel.onchange = actualizarFormularioFinanza;
-  if(productoSel) productoSel.onchange = aplicarProductoADetalle;
+  if(productoSel) productoSel.onchange = actualizarCamposProducto;
+  if(cantidadInput) cantidadInput.oninput = calcularMontoSimple;
+  if(cantRaspadilla) cantRaspadilla.oninput = calcularMontoAmbos;
+  if(cantMarciano) cantMarciano.oninput = calcularMontoAmbos;
   actualizarFormularioFinanza();
 
   const addF = document.getElementById('addFinanza');
@@ -481,8 +558,21 @@ function attachPanelHandlers(){
 }
 
 (async function init(){
-  await loadAll();
+  if(firebaseConfig.apiKey === 'TU_API_KEY'){
+    document.getElementById('app').innerHTML = `
+      <div style="padding:60px 20px;text-align:center;color:#fff;line-height:1.7;">
+        <h2 style="font-family:'Baloo 2';margin-bottom:12px;">⚠️ Falta conectar Firebase</h2>
+        <p style="color:var(--muted);max-width:440px;margin:0 auto;">
+          Reemplaza los datos de <b>firebaseConfig</b> al inicio del código con los de tu proyecto
+          de Firebase (Firebase Console → Configuración del proyecto → tus apps → SDK).
+        </p>
+      </div>`;
+    return;
+  }
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
   render();
+  iniciarSincronizacion();
 })();
 </script>
 </body>
