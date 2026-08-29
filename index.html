@@ -157,7 +157,7 @@ const firebaseConfig = {
 const STORAGE_KEYS = { finanzas:'finanzas', inventario:'inventario', inversion:'inversion', config:'config' };
 let state = { finanzas:[], inventario:[], inversion:[], config:{pin:'2027'} };
 let mode = 'admin'; // 'admin' | 'investor'
-let unlocked = false;
+let unlocked = (localStorage.getItem('cg_unlocked') === '1');
 let tab = 'resumen';
 let db = null;
 
@@ -230,7 +230,7 @@ function pinScreen(){
 function attachPinHandlers(){
   document.getElementById('pinBtn').onclick = ()=>{
     const v = document.getElementById('pinInput').value.trim();
-    if(v === state.config.pin){ unlocked = true; render(); }
+    if(v === state.config.pin){ unlocked = true; localStorage.setItem('cg_unlocked','1'); render(); }
     else document.getElementById('pinErr').textContent = 'PIN incorrecto.';
   };
   document.getElementById('toInvestor').onclick = ()=>{ mode='investor'; render(); };
@@ -311,7 +311,7 @@ function panelResumen(isInvestor){
 function panelFinanzas(){
   const rows = [...state.finanzas].sort((a,b)=>b.fecha.localeCompare(a.fecha)).map(f=>`
     <tr>
-      <td>${f.fecha}</td>
+      <td>${f.fecha}${f.hora ? `<div style="font-size:11px;color:var(--muted);">${f.hora}</div>` : ''}</td>
       <td>${f.tipo==='ingreso' ? `<span class="tag ${f.metodo==='YAPE'?'tag-yape':'tag-efectivo'}">${f.metodo}</span>` : `<span class="tag tag-gasto">Gasto</span>`}</td>
       <td>${f.detalle||'—'}</td>
       <td style="text-align:right;font-weight:700;color:${f.tipo==='ingreso'?'var(--lime)':'var(--raspberry)'}">${f.tipo==='ingreso'?'+':'−'}${fmt(f.monto)}</td>
@@ -527,7 +527,9 @@ function attachPanelHandlers(){
     const monto = parseFloat(document.getElementById('fMonto').value);
     if(!monto || monto<=0){ alert('Ingresa un monto válido.'); return; }
     state.finanzas.push({ id:uid(), tipo, metodo: tipo==='ingreso'?document.getElementById('fMetodo').value:null,
-      fecha: document.getElementById('fFecha').value || todayStr(), monto, detalle: document.getElementById('fDetalle').value });
+      fecha: document.getElementById('fFecha').value || todayStr(),
+      hora: new Date().toLocaleTimeString('es-PE', {hour:'2-digit', minute:'2-digit'}),
+      monto, detalle: document.getElementById('fDetalle').value });
     await save('finanzas'); render();
   };
   const addI = document.getElementById('addInventario');
