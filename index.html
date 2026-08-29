@@ -321,6 +321,16 @@ function panelFinanzas(){
   return `
   <div class="card">
     <h3 style="margin-bottom:14px;font-size:15px;">Registrar movimiento</h3>
+    <div class="form-row" style="align-items:center;margin-bottom:14px;">
+      <div style="grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-ghost" id="voiceBtn">🎙️ Dictar movimiento</button>
+        <span id="voiceStatus" style="font-size:12px;color:var(--muted);">Di algo como: "tres raspadillas, yape" o "gasto de 15 soles en vasos, efectivo"</span>
+      </div>
+      <div id="voiceTranscriptWrap" style="grid-column:1/-1;display:none;margin-top:8px;">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">Escuché:</div>
+        <div id="voiceTranscript" style="font-size:14px;background:var(--card-2,#f4f4f4);padding:8px 10px;border-radius:8px;"></div>
+      </div>
+    </div>
     <div class="form-row">
       <div><label>Tipo</label><select id="fTipo"><option value="ingreso">Ingreso</option><option value="gasto">Gasto</option></select></div>
       <div id="fMetodoWrap"><label>Método (si es ingreso)</label><select id="fMetodo"><option>YAPE</option><option>Efectivo</option></select></div>
@@ -506,8 +516,164 @@ function calcularMontoAmbos(){
   document.getElementById('fDetalle').value = partes.join(' + ') || 'Raspadilla + Marciano';
 }
 
+/* ---------- DICTADO POR VOZ (Finanzas) ---------- */
+const NUM_PALABRAS = {
+  'un':1,'uno':1,'una':1,'dos':2,'tres':3,'cuatro':4,'cinco':5,'seis':6,'siete':7,
+  'ocho':8,'nueve':9,'diez':10,'once':11,'doce':12,'trece':13,'catorce':14,'quince':15,
+  'dieciseis':16,'diecisiete':17,'dieciocho':18,'diecinueve':19,'veinte':20,
+  'veintiuno':21,'veintidos':22,'veintitres':23,'veinticuatro':24,'veinticinco':25,
+  'treinta':30,'cuarenta':40,'cincuenta':50
+};
+function normalizarTexto(s){
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+}
+function extraerNumeroCerca(palabras, idx, ventana){
+  // busca un número (dígito o palabra) dentro de `ventana` posiciones antes del índice idx
+  for(let i=idx-1; i>=Math.max(0, idx-ventana); i--){
+    const w = palabras[i].replace(/[.,]/g,'');
+    if(/^\d+(\.\d+)?$/.test(w)) return parseFloat(w);
+    if(NUM_PALABRAS[w] !== undefined) return NUM_PALABRAS[w];
+  }
+  return null;
+}
+function parseDictadoFinanza(textoOriginal){
+  const texto = normalizarTexto(textoOriginal);
+  const palabras = texto.split(/\s+/);
+  const resultado = { tipo:null, producto:null, metodo:null, cantidad:null,
+    cantRaspadilla:0, cantMarciano:0, monto:null, detalle:null };
+
+  const esGasto = /\b(gasto|gaste|compre|compra|pague|pago|gastos)\b/.test(texto);
+  resultado.tipo = esGasto ? 'gasto' : 'ingreso';
+
+  if(/yape/.test(texto)) resultado.metodo = 'YAPE';
+  else if(/efectivo|cash/.test(texto)) resultado.metodo = 'Efectivo';
+
+  const tieneRaspadilla = /raspadilla/.test(texto);
+  const tieneMarciano = /marciano/.test(texto);
+
+  palabras.forEach((w,i)=>{
+    if(w.startsWith('raspadilla')){
+      const n = extraerNumeroCerca(palabras, i, 3);
+      if(n!==null) resultado.cantRaspadilla += n;
+    }
+    if(w.startsWith('marciano')){
+      const n = extraerNumeroCerca(palabras, i, 3);
+      if(n!==null) resultado.cantMarciano += n;
+    }
+  });
+
+  if(tieneRaspadilla && tieneMarciano){
+    resultado.producto = 'Ambos';
+  } else if(tieneRaspadilla){
+    resultado.producto = 'Raspadilla';
+    resultado.cantidad = resultado.cantRaspadilla || null;
+  } else if(tieneMarciano){
+    resultado.producto = 'Marciano';
+    resultado.cantidad = resultado.cantMarciano || null;
+  } else if(esGasto){
+    resultado.producto = /almuerzo/.test(texto) ? 'Almuerzo' : 'Otro';
+  } else {
+    resultado.producto = 'Otro';
+  }
+
+  // monto explícito: "20 soles", "s/ 20", "s/. 20"
+  const montoMatch = texto.match(/(?:s\/\.?\s*)(\d+(\.\d+)?)/) || texto.match(/(\d+(\.\d+)?)\s*soles/);
+  if(montoMatch) resultado.monto = parseFloat(montoMatch[1]);
+  else {
+    // intenta con número en palabras seguido de "soles"
+    palabras.forEach((w,i)=>{
+      if(w==='soles' && i>0){
+        const prev = palabras[i-1];
+        if(NUM_PALABRAS[prev]!==undefined) resultado.monto = NUM_PALABRAS[prev];
+      }
+    });
+  }
+
+  if(esGasto && resultado.producto==='Otro'){
+    // usa el texto tal cual como detalle, quitando palabras de comando
+    resultado.detalle = textoOriginal
+      .replace(/\b(gasto|gaste|compre|compra|pague|pago|de|en|soles|efectivo|yape)\b/gi,'')
+      .replace(/\s+/g,' ').trim();
+  }
+
+  return resultado;
+}
+function aplicarDictadoAlFormulario(r){
+  const fTipo = document.getElementById('fTipo');
+  const fMetodo = document.getElementById('fMetodo');
+  const fProducto = document.getElementById('fProducto');
+  const fCantidad = document.getElementById('fCantidad');
+  const fCantRaspadilla = document.getElementById('fCantRaspadilla');
+  const fCantMarciano = document.getElementById('fCantMarciano');
+  const fMonto = document.getElementById('fMonto');
+  const fDetalle = document.getElementById('fDetalle');
+  if(!fTipo) return;
+
+  fTipo.value = r.tipo;
+  actualizarFormularioFinanza();
+
+  if(r.metodo && fMetodo) fMetodo.value = r.metodo;
+  if(r.producto) fProducto.value = r.producto;
+  actualizarCamposProducto();
+
+  if(r.producto==='Ambos'){
+    if(fCantRaspadilla) fCantRaspadilla.value = r.cantRaspadilla || '';
+    if(fCantMarciano) fCantMarciano.value = r.cantMarciano || '';
+    calcularMontoAmbos();
+  } else if(r.producto==='Raspadilla' || r.producto==='Marciano'){
+    if(fCantidad) fCantidad.value = r.cantidad || '';
+    calcularMontoSimple();
+  }
+
+  if(r.monto!==null) fMonto.value = r.monto.toFixed(2);
+  if(r.detalle) fDetalle.value = r.detalle;
+}
+function attachVoiceHandler(){
+  const btn = document.getElementById('voiceBtn');
+  const status = document.getElementById('voiceStatus');
+  const transcriptWrap = document.getElementById('voiceTranscriptWrap');
+  const transcriptEl = document.getElementById('voiceTranscript');
+  if(!btn) return;
+
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SpeechRec){
+    btn.disabled = true;
+    status.textContent = 'Tu navegador no soporta dictado por voz. Prueba con Chrome.';
+    return;
+  }
+
+  btn.onclick = ()=>{
+    const rec = new SpeechRec();
+    rec.lang = 'es-PE';
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+
+    btn.disabled = true;
+    btn.textContent = '🎙️ Escuchando...';
+    status.textContent = 'Habla ahora, ej: "tres raspadillas, yape"';
+
+    rec.onresult = (e)=>{
+      const texto = e.results[0][0].transcript;
+      transcriptWrap.style.display = '';
+      transcriptEl.textContent = texto;
+      const r = parseDictadoFinanza(texto);
+      aplicarDictadoAlFormulario(r);
+      status.textContent = 'Revisa los campos y presiona "Agregar movimiento" para confirmar.';
+    };
+    rec.onerror = (e)=>{
+      status.textContent = 'No se pudo escuchar bien. Intenta de nuevo (' + e.error + ').';
+    };
+    rec.onend = ()=>{
+      btn.disabled = false;
+      btn.textContent = '🎙️ Dictar movimiento';
+    };
+    rec.start();
+  };
+}
+
 function attachPanelHandlers(){
   document.querySelectorAll('.tab').forEach(b=>{ b.onclick = ()=>{ tab=b.dataset.t; render(); }; });
+  attachVoiceHandler();
 
   const tipoSel = document.getElementById('fTipo');
   const productoSel = document.getElementById('fProducto');
